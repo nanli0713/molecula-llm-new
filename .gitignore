@@ -1,0 +1,81 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Build
+build/
+dist/
+*.egg-info/
+
+# Test / lint cache
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual env
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Logs
+*.log
+nohup.out
+
+# Env files
+.env
+.env.*
+
+# ML artifacts
+apex/
+MolBART/
+pysmilesutils/
+data/
+checkpoints/
+outputs/
+results/
+wandb/
+mlruns/
+results_*/
+results-*/
+oracle/
+data*/
+GPT4_*.py
+GPT4 *.py
+GPT4-*.py
+run_*.py
+run *.py
+*.sh
+*.ipynb
+
+# Model files
+*.pt
+*.pth
+*.ckpt
+*.bin
+*.log
+*.yaml
+*.txt
+*.pkl
+*.tar.gz
+*.db
+*.csv
+*.tsv
+*.tex
+*.tar.xz
+RL+LLM+EA_before_talk_best_res_task1/main/molleo_multi/datas_task1.tar.xz
+RL+LLM+EA_before_talk_best_res_task1_copy/main/molleo_multi/datas_task1.tar.xz
