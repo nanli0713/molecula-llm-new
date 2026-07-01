@@ -79,3 +79,9 @@ run *.py
 *.tar.xz
 RL+LLM+EA_before_talk_best_res_task1/main/molleo_multi/datas_task1.tar.xz
 RL+LLM+EA_before_talk_best_res_task1_copy/main/molleo_multi/datas_task1.tar.xz
+RL+LLM+EA_before_talk_best_res_task1_copy/main/molleo_multi/ablation_results_task1/
+RL+LLM+EA_before_talk_best_res_task1_copy/main/molleo_multi/ablation_model_cache_task1/
+RL+LLM+EA_before_talk_best_res_task1_copy/logs/ablations_task1/
+!RL+LLM+EA_before_talk_best_res_task1_copy/main/molleo_multi/task1_ablation_plan.yaml
+!RL+LLM+EA_before_talk_best_res_task1_copy/scripts/run_task1_ablations.py
+!RL+LLM+EA_before_talk_best_res_task1_copy/scripts/summarize_task1_ablations.py

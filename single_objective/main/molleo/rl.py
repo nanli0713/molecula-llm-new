@@ -413,16 +413,16 @@ class EpisodeManager:
         stats = {
             "n": float(n),
             "max": float(t.max().item()) if n > 0 else float("-inf"),
-            "mean": float(torch.nanmean(t).item()) if n > 0 else float("nan"),
-            "median": float(torch.nanmedian(t).item()) if n > 0 else float("nan"),
+            "mean": float(t.mean().item()) if n > 0 else float("nan"),
+            "median": float(t.median().item()) if n > 0 else float("nan"),
         }
 
         if n > 0:
             k = max(1, min(self.topk, n))
             topk_vals, _ = torch.topk(t, k=k, largest=True, sorted=False)
-            stats["topk_mean"] = float(torch.nanmean(topk_vals).item())
+            stats["topk_mean"] = float(topk_vals.mean().item())
             q = min(max(self.quantile, 0.0), 1.0) 
-            stats["quantile"] = float(torch.nanquantile(t, q=q).item())
+            stats["quantile"] = float(torch.quantile(t, q=q).item())
         else:
             stats["topk_mean"] = float("nan") 
             stats["quantile"] = float("nan") 
@@ -478,11 +478,12 @@ class EpisodeManager:
 
         target_hit = False  
         if self.target_reward is not None and r.numel() > 0: 
+            target_values = r[~torch.isnan(r)] if self.ignore_nan else r
             if self.target_mode == "any": 
-                target_hit = bool(torch.nanmax(r).item() >= self.target_reward)  
+                target_hit = bool(target_values.numel() > 0 and target_values.max().item() >= self.target_reward)
             else:  
                 target_hit = bool(agg_for_patience >= self.target_reward)  
-            stats["frac_ge_target"] = float(torch.mean((r >= self.target_reward).float()).item()) if self.target_mode == "any" else float("nan") 
+            stats["frac_ge_target"] = float(torch.mean((target_values >= self.target_reward).float()).item()) if self.target_mode == "any" and target_values.numel() > 0 else float("nan") 
         else:
             stats["frac_ge_target"] = float("nan")
 

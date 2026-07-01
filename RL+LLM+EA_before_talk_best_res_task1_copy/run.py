@@ -6,8 +6,8 @@ import yaml
 import os  
 import sys  
 sys.path.append(os.path.realpath(__file__))  
-from tdc import Oracle  
 from time import time  
+from main.ablation import available_ablations, describe_ablations, get_ablation_config
 
 def main():
     start_time = time()  
@@ -31,9 +31,25 @@ def main():
     parser.add_argument('--task_mode', type=str, default='1')  
     parser.add_argument('--log_results', action='store_true')  
     parser.add_argument('--log_dir', default="./results")  
+    parser.add_argument(
+        '--ablation',
+        type=str,
+        default='full',
+        choices=available_ablations(),
+        help='Ablation preset to run. Defaults to the full MOL-E3 configuration.',
+    )
+    parser.add_argument(
+        '--list_ablations',
+        action='store_true',
+        help='Print available ablation presets and exit.',
+    )
     args = parser.parse_args()  
+    if args.list_ablations:
+        print(describe_ablations())
+        return
 
     args.method = args.method.lower()  
+    args.ablation_config = get_ablation_config(args.ablation)
 
     path_main = os.path.dirname(os.path.realpath(__file__))  
     path_main = os.path.join(path_main, "main", args.method)  
@@ -49,10 +65,9 @@ def main():
         raise ValueError("Unrecognized method name.")  
 
     if args.output_dir is None:  
-        args.output_dir = os.path.join(path_main, "results") 
+        args.output_dir = os.path.join(path_main, "results", args.ablation)
 
-    if not os.path.exists(args.output_dir): 
-        os.mkdir(args.output_dir)  
+    os.makedirs(args.output_dir, exist_ok=True)
 
     if args.pickle_directory is None:
         args.pickle_directory = path_main 
@@ -69,6 +84,7 @@ def main():
     else:
         print('Undefined Task!') 
     print(f"run.py {args.task_mode}")
+    print(f"Ablation: {args.ablation} - {args.ablation_config.description}")
     try:
         config_default = yaml.safe_load(open(args.config_default))
     except:

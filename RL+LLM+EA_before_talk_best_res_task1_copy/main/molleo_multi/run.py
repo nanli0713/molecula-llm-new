@@ -17,6 +17,7 @@ from settings import settings
 import rdkit
 from reward import RDKitToxicityScorer, RewardConfig, RewardEngine
 import crossover as co, mutate as mu
+from main.ablation import get_ablation_config
 from main.optimizer import BaseOptimizer
 from torch.utils.data import DataLoader
 from crossAtt import MolMultiModalDataset
@@ -868,11 +869,47 @@ def query_oracle_with_cache(oracle, smiles_list, score_cache, detail_cache=None)
     details_out = [detail_cache.get(smi, None) for smi in smiles_list]
     return scores_out, details_out
 
+query_oracle_with_local_buffer = query_oracle_with_cache
+
+def as_prompt_text(items):
+    if items is None:
+        return ""
+    if isinstance(items, str):
+        return items
+    if isinstance(items, (list, tuple, set)):
+        return "\n".join(str(item) for item in items if item is not None)
+    return str(items)
+
+def extract_fragment_lines(prompt_lines, limit):
+    if not prompt_lines or limit <= 0:
+        return ""
+    fragments = []
+    for line in prompt_lines:
+        text = str(line)
+        if "FRAG]" in text:
+            fragments.append(text.split("FRAG]", 1)[1].split("|", 1)[0].strip())
+        else:
+            fragments.append(text.strip())
+        if len(fragments) >= limit:
+            break
+    return "\n".join(item for item in fragments if item)
+
+def choose_ablation_action(ablation_cfg, selector, q_values, cluster_id, n_actions, mol_lm_name=None):
+    if ablation_cfg.strategy_mode == "random":
+        return random.randrange(n_actions)
+    if ablation_cfg.strategy_mode == "fixed":
+        if int(ablation_cfg.fixed_action) < 0:
+            return 0 if mol_lm_name == "BioT5" else 2
+        return int(ablation_cfg.fixed_action)
+    return selector.pick(q_values, cluster_id=cluster_id)
+
 class GB_GA_Optimizer(BaseOptimizer):
 
     def __init__(self, args=None):
         super().__init__(args)
         self.model_name = "graph_ga"
+        self.ablation = getattr(args, "ablation_config", get_ablation_config(getattr(args, "ablation", "full")))
+        print(f"Using ablation config: {self.ablation.name}")
 
         self.mol_lm = None
         if args.mol_lm == "GPT-4":
@@ -950,7 +987,7 @@ Do not omit any important low-score details, especially attachment point informa
         self.init_crossatt_path = settings.model_init_path_url
         self.init_crossatt_path_pre = settings.model_init_predictor_path_url
         self.add_crossatt_path = settings.model_add_path_url
-        self.add_crossatt_path_pre = settings.model_init_predictor_path_url
+        self.add_crossatt_path_pre = getattr(settings, "model_add_predictor_path_url", None) or settings.model_init_predictor_path_url
         self.high_pool_size = len(self.high_score_mols)
         self.low_pool_size = len(self.low_score_mols)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -1090,6 +1127,8 @@ Do not omit any important low-score details, especially attachment point informa
         print("CWD:", os.getcwd())
         print("gsk3b.pkl exists:", os.path.exists("oracle/gsk3b.pkl"))
         print("gsk3b_current.pkl exists:", os.path.exists("oracle/gsk3b_current.pkl"))
+        ablation = self.ablation
+        print(f"Active ablation preset: {ablation.name}")
 
         self.oracle.assign_evaluator(self.args)
         # self.oracle_other.assign_evaluator(self.args)
@@ -1102,6 +1141,8 @@ Do not omit any important low-score details, especially attachment point informa
             # Exploration run
             starting_population = np.random.choice(self.all_smiles, config["population_size"])
         self.init_dqn_components()
+        if not ablation.use_rl:
+            print(f"DQN disabled for ablation '{ablation.name}', strategy_mode={ablation.strategy_mode}.")
 
         # select initial population
         population_smiles = starting_population
@@ -1149,8 +1190,8 @@ Do not omit any important low-score details, especially attachment point informa
                 low_mols=self.low_score_mols,
                 high_scores=self.high_scores,
                 low_scores=self.low_scores,
-                k_high=3,
-                k_low=2,
+                k_high=ablation.dkb_high_k if ablation.use_positive_memory else 0,
+                k_low=ablation.dkb_low_k if ablation.use_negative_memory else 0,
                 exploration_temp=None,
                 alpha=1.0,
                 replacement_threshold=5,
@@ -1166,13 +1207,15 @@ Do not omit any important low-score details, especially attachment point informa
             print("Num low ctx:", len(res["low"]["ctx"]))
             print("High prompt lines:", res["high"]["prompt_lines"][:5])
             print("Low prompt lines:", res["low"]["prompt_lines"][:5])
-            h_prompt_lines = res["high"]["prompt_lines"]
-            l_prompt_lines = res["low"]["prompt_lines"]
+            h_prompt_lines = res["high"]["prompt_lines"] if ablation.use_positive_memory else []
+            l_prompt_lines = res["low"]["prompt_lines"] if ablation.use_negative_memory else []
             combine_prompt_high = h_prompt_lines
             combine_prompt_low = l_prompt_lines
             global CURRENT_HIGH_POOL_FEATURE, CURRENT_LOW_POOL_FEATURE
-            CURRENT_HIGH_POOL_FEATURE = get_mol_pool_feature(self.high_score_mols, fp_type="morgan")
-            CURRENT_LOW_POOL_FEATURE = get_mol_pool_feature(self.low_score_mols, fp_type="morgan")
+            state_high_mols = self.high_score_mols if ablation.use_positive_memory else []
+            state_low_mols = self.low_score_mols if ablation.use_negative_memory else []
+            CURRENT_HIGH_POOL_FEATURE = get_mol_pool_feature(state_high_mols, fp_type="morgan")
+            CURRENT_LOW_POOL_FEATURE = get_mol_pool_feature(state_low_mols, fp_type="morgan")
             # if self.args.mol_lm == 'GPT-4':
             #     h_prompt = self.task_desc1_high + "\n" + "\n".join(h_prompt_lines) + "\n" + self.task_desc2_high
             #     _, r = query_LLM(h_prompt)
@@ -1196,12 +1239,12 @@ Do not omit any important low-score details, especially attachment point informa
             #     print("combine_prompt_high:", combine_prompt_high)
             if self.args.mol_lm == 'GPT-4':
                 print(f"h_prompt_lines: {h_prompt_lines}")
-                combine_prompt_high = res["high"]["chosen_frags"][:10]
-                combine_prompt_low = res["low"]["chosen_frags"][:10]
+                combine_prompt_high = extract_fragment_lines(h_prompt_lines, 10)
+                combine_prompt_low = extract_fragment_lines(l_prompt_lines, 10)
             if self.args.mol_lm == 'BioT5':
                 print(f"h_prompt_lines: {h_prompt_lines}")
-                combine_prompt_high = res["high"]["chosen_frags"][:10]
-                combine_prompt_low = res["low"]["chosen_frags"][:10]
+                combine_prompt_high = extract_fragment_lines(h_prompt_lines, 10)
+                combine_prompt_low = extract_fragment_lines(l_prompt_lines, 10)
             offspring_mol = []
             action_records = []
             parent_main_scores = {}
@@ -1224,8 +1267,8 @@ Do not omit any important low-score details, especially attachment point informa
                 state = build_state_dict(
                     parents=parents_mols,
                     clustering_data=self.clustering_data[1],
-                    high_score_mols=self.high_score_mols,
-                    low_score_mols=self.low_score_mols,
+                    high_score_mols=state_high_mols,
+                    low_score_mols=state_low_mols,
                     fp_type="morgan"
                 )
                 s = torch.cat([state["parent_fp"], state["cluster_center"], state["high_pool"], state["low_pool"]], dim=0).to(self.device)
@@ -1233,7 +1276,7 @@ Do not omit any important low-score details, especially attachment point informa
                 cid = nearest_cluster_id(parents_mols[0], parents_mols[1], self.clustering_data[1], fp_type="morgan")
                 with torch.no_grad():
                     q_vals = self.trainer.q(s.unsqueeze(0))
-                action = self.selector.pick(q_vals, cluster_id=cid)
+                action = choose_ablation_action(ablation, self.selector, q_vals, cid, self.n_actions, self.args.mol_lm)
                 last_state_tensor = s
                 last_action = action
                 last_next_parents = parents_mols
@@ -1251,8 +1294,8 @@ Do not omit any important low-score details, especially attachment point informa
                     state = build_state_dict(
                         parents=parents_mols,
                         clustering_data=self.clustering_data[1],
-                        high_score_mols=self.high_score_mols,
-                        low_score_mols=self.low_score_mols,
+                        high_score_mols=state_high_mols,
+                        low_score_mols=state_low_mols,
                         fp_type="morgan"
                     )
                     s = torch.cat([state["parent_fp"], state["cluster_center"], state["high_pool"], state["low_pool"]], dim=0).to(self.device)
@@ -1260,7 +1303,7 @@ Do not omit any important low-score details, especially attachment point informa
                     cid = nearest_cluster_id(parents_mols[0], parents_mols[1], self.clustering_data[1], fp_type="morgan")
                     with torch.no_grad():
                         q_vals = self.trainer.q(s.unsqueeze(0))
-                    action = self.selector.pick(q_vals, cluster_id=cid)
+                    action = choose_ablation_action(ablation, self.selector, q_vals, cid, self.n_actions, self.args.mol_lm)
                     last_state_tensor = s
                     last_action = action
                     last_next_parents = parents_mols
@@ -1282,8 +1325,10 @@ Do not omit any important low-score details, especially attachment point informa
                         off, _ = self.mol_lm.edit(
                             parents_mols, parent_scores, parent_scores_detail,
                             config["mutation_rate"],
-                            combine_prompt_high, combine_prompt_low,
-                            past_generation, past_generation_total, past_generation_total_low,
+                            as_prompt_text(combine_prompt_high), as_prompt_text(combine_prompt_low),
+                            past_generation,
+                            past_generation_total if ablation.use_history_prompt else [],
+                            past_generation_total_low if ablation.use_history_prompt else [],
                             action, iteration
                         )
                         if off is None:
@@ -1444,7 +1489,14 @@ Do not omit any important low-score details, especially attachment point informa
                         attempts += 1
                         # ===== 优化点3：与GPT-4完全一致的edit调用参数 =====
                         past_generation_total = dedup_nested_list(past_generation_total)  # 去重全局历史
-                        edited_mols = self.mol_lm.edit([parent_mols], combine_prompt_high, combine_prompt_low, past_generation, past_generation_total, action)
+                        edited_mols = self.mol_lm.edit(
+                            [parent_mols],
+                            as_prompt_text(combine_prompt_high),
+                            as_prompt_text(combine_prompt_low),
+                            past_generation,
+                            past_generation_total if ablation.use_history_prompt else [],
+                            action
+                        )
                         
                         # ===== 优化点4：严格的空结果处理（与GPT-4一致）=====
                         if edited_mols is None or len(edited_mols) == 0:
@@ -1545,6 +1597,8 @@ Do not omit any important low-score details, especially attachment point informa
 
             toxic_out = self.toxic_scorers.score_mol_list(population_mol)
             top10_main = float(np.mean(sorted(population_scores, reverse=True)[:10]))
+            if not ablation.use_reward_memory:
+                self.reward_engine.frag_weights = {}
             reward_scores = self.reward_engine.get_reward(
                 population_mol,
                 population_scores,
@@ -1554,7 +1608,17 @@ Do not omit any important low-score details, especially attachment point informa
                 top10_main
             )
             print(f"population_scores: {len(population_scores)}, offspring_mol:{len(offspring_mol)}, valid_offspring:{len(valid_offspring_mol)}")
-            if iteration % 3 == 0:
+            if ablation.use_incremental_retrain and iteration % 3 == 0:
+                if len(offspring_mol_temp) == 0:
+                    print("Skip LoRA retraining because offspring_mol_temp is empty.")
+                    continue_retrain = False
+                else:
+                    continue_retrain = True
+            else:
+                continue_retrain = False
+                if iteration % 3 == 0:
+                    print(f"Skip LoRA retraining for ablation '{ablation.name}'.")
+            if continue_retrain:
                 if iteration != 1 and iteration != 2 and iteration != 3:
                     self.cross_att.load_state_dict(torch.load(self.add_crossatt_path, map_location=self.device))
                     self.cross_att_predictor.load_state_dict(torch.load(self.add_crossatt_path_pre, map_location=self.device))
@@ -1571,8 +1635,14 @@ Do not omit any important low-score details, especially attachment point informa
                 recent_experience = offspring_mol_temp
 
                 training_batch = recent_experience
-                smiles_batch = [item[0] for item in training_batch]
-                labels_batch = [item[1] for item in training_batch]
+                smiles_batch = []
+                labels_batch = []
+                for mol, score in training_batch:
+                    try:
+                        smiles_batch.append(Chem.MolToSmiles(mol, canonical=True))
+                        labels_batch.append(score)
+                    except Exception:
+                        continue
 
                 incremental_dataset = MolMultiModalDataset(smiles_batch, labels_batch)
                 incremental_loader = DataLoader(incremental_dataset, batch_size=32, shuffle=False, collate_fn=collate_fn)
@@ -1621,7 +1691,7 @@ Do not omit any important low-score details, especially attachment point informa
                 print(f"len of population right now: {len(offspring_mol_temp)}")
                 offspring_mol_temp = []
 
-            if self.replay is not None and self.trainer is not None and len(self.replay) >= self.batch_size:
+            if ablation.use_rl and self.replay is not None and self.trainer is not None and len(self.replay) >= self.batch_size:
                 train_loss = self.trainer.train_step(self.replay, self.batch_size)
                 if train_loss is not None:
                     print(f"DQN train loss: {train_loss:.4f}")
@@ -1633,40 +1703,48 @@ Do not omit any important low-score details, especially attachment point informa
                 candidates = [(parent_mol[2], parent_score[2]), (parent_mol[3], parent_score[3])]
                 next_parents = [candidates[0][0], candidates[1][0]]
             
-            self.high_score_mols, self.high_scores = update_high_pool(
-                self.high_score_mols,
-                self.high_scores,
-                valid_offspring_mol,
-                valid_off_scores,
-                self.high_pool_size
-            )
+            if ablation.update_positive_memory:
+                self.high_score_mols, self.high_scores = update_high_pool(
+                    self.high_score_mols,
+                    self.high_scores,
+                    valid_offspring_mol,
+                    valid_off_scores,
+                    self.high_pool_size
+                )
             current_high_frags = set()
-            for m in self.high_score_mols:
-                mol = ensure_mol(m)
-                try:
-                    current_high_frags.update(get_brics_fragments(mol))
-                except Exception:
-                    continue
+            if ablation.update_positive_memory:
+                for m in self.high_score_mols:
+                    mol = ensure_mol(m)
+                    try:
+                        current_high_frags.update(get_brics_fragments(mol))
+                    except Exception:
+                        continue
 
-            self.high_frag_history.append(current_high_frags)
-            self.high_frag_history = self.high_frag_history[-self.high_frag_history_maxlen:]
+                self.high_frag_history.append(current_high_frags)
+                self.high_frag_history = self.high_frag_history[-self.high_frag_history_maxlen:]
 
-            self.low_score_mols, self.low_scores = update_low_pool(
-                self.low_score_mols,
-                self.low_scores,
-                valid_offspring_mol,
-                valid_off_scores,
-                self.low_pool_size
-            )
+            if ablation.update_negative_memory:
+                self.low_score_mols, self.low_scores = update_low_pool(
+                    self.low_score_mols,
+                    self.low_scores,
+                    valid_offspring_mol,
+                    valid_off_scores,
+                    self.low_pool_size
+                )
 
-            CURRENT_HIGH_POOL_FEATURE = get_mol_pool_feature(self.high_score_mols, fp_type="morgan")
-            CURRENT_LOW_POOL_FEATURE = get_mol_pool_feature(self.low_score_mols, fp_type="morgan")
+            state_high_mols = self.high_score_mols if ablation.use_positive_memory else []
+            state_low_mols = self.low_score_mols if ablation.use_negative_memory else []
+            CURRENT_HIGH_POOL_FEATURE = get_mol_pool_feature(state_high_mols, fp_type="morgan")
+            CURRENT_LOW_POOL_FEATURE = get_mol_pool_feature(state_low_mols, fp_type="morgan")
 
-            self.reward_engine.refresh_memory(
-                high_mols=self.high_score_mols,
-                low_mols=self.low_score_mols,
-                recompute_frag_weights=True
-            )
+            if ablation.use_reward_memory:
+                self.reward_engine.refresh_memory(
+                    high_mols=state_high_mols,
+                    low_mols=state_low_mols,
+                    recompute_frag_weights=True
+                )
+            else:
+                self.reward_engine.frag_weights = {}
             if len(valid_offspring_mol) > 0:
                 offspring_toxic_out = self.toxic_scorers.score_mol_list(valid_offspring_mol)
                 offspring_reward = self.reward_engine.get_reward(
@@ -1689,8 +1767,8 @@ Do not omit any important low-score details, especially attachment point informa
                 next_state = build_state_dict(
                     parents=next_parents,
                     clustering_data=self.clustering_data[1],
-                    high_score_mols=self.high_score_mols,
-                    low_score_mols=self.low_score_mols,
+                    high_score_mols=state_high_mols,
+                    low_score_mols=state_low_mols,
                     fp_type="morgan"
                 )
                 s2 = torch.cat([next_state["parent_fp"], next_state["cluster_center"], next_state["high_pool"], next_state["low_pool"]], dim=0).to(self.device)
@@ -1698,7 +1776,7 @@ Do not omit any important low-score details, especially attachment point informa
                 offspring_reward = reward_scores[-config["offspring_size"]:] if len(reward_scores) > 0 else [0.0]
             done = self.episode.step(offspring_reward)
             next_replay_state = None if done or s2 is None else s2.detach().cpu()
-            if self.args.mol_lm == 'GPT-4' and action_records:
+            if ablation.use_rl and self.args.mol_lm == 'GPT-4' and action_records:
                 for rec in action_records:
                     self.replay.push(
                         rec["state"],
@@ -1707,7 +1785,7 @@ Do not omit any important low-score details, especially attachment point informa
                         next_replay_state,
                         done
                     )
-            elif last_state_tensor is not None and last_action is not None:
+            elif ablation.use_rl and last_state_tensor is not None and last_action is not None:
                 self.replay.push(
                     last_state_tensor.detach().cpu(),
                     last_action,

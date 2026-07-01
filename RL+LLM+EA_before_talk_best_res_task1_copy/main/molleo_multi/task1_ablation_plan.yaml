@@ -1,0 +1,35 @@
+task: task1
+objectives:
+  maximize:
+    - jnk3
+    - qed
+  minimize:
+    - sa
+recommended_backbone: BioT5
+recommended_seeds:
+  - 1
+  - 2
+  - 3
+ablations:
+  - full
+  - no_rl
+  - random_strategy
+  - no_dkb
+  - no_positive_memory
+  - no_negative_memory
+  - static_dkb
+  - no_incremental_retrain
+  - no_history_prompt
+optional_baseline:
+  - molleo_like
+notes:
+  full: Complete MOL-E3 setting from main.tex.
+  no_rl: Tests whether learned high-level strategy selection is useful.
+  random_strategy: Replaces DQN with uniform random action scheduling.
+  no_dkb: Tests the dynamic knowledge-base contribution.
+  no_positive_memory: Removes high-scoring fragment guidance.
+  no_negative_memory: Removes low-scoring fragment avoidance.
+  static_dkb: Keeps the initial knowledge base but disables online memory refresh and incremental retraining.
+  no_incremental_retrain: Keeps memory refresh but freezes the cross-attention scorer after initialization.
+  no_history_prompt: Removes previous high/low generated molecule feedback from prompts.
+  molleo_like: Memoryless LLM-editing baseline useful as a sanity-check baseline.

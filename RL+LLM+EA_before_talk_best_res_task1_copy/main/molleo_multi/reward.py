@@ -160,6 +160,29 @@ class RewardEngine:
         else:
             self.frag_weights = {}
 
+    def refresh_memory(
+        self,
+        high_mols: Optional[List[Any]] = None,
+        low_mols: Optional[List[Any]] = None,
+        all_smiles: Optional[Iterable[Any]] = None,
+        recompute_frag_weights: bool = True,
+    ) -> None:
+        if high_mols is not None:
+            self.high_mols = list(high_mols)
+        if low_mols is not None:
+            self.low_mols = list(low_mols)
+        if all_smiles is not None:
+            self.all_smiles.update(str(item) for item in all_smiles if item is not None)
+
+        if (
+            recompute_frag_weights
+            and self.high_mols is not None
+            and self.low_mols is not None
+        ):
+            high_ff = count_frag_freq(self.high_mols)
+            low_ff = count_frag_freq(self.low_mols)
+            self.frag_weights = calc_frag_weights(high_ff, low_ff, epsilon=1e-3)
+
     def _novelty_terms(self, best_sim: float, is_new: bool) -> Tuple[float, float, bool]:
         """
         novelty_raw = -|best_sim - target_sim|  
