@@ -884,12 +884,18 @@ def extract_fragment_lines(prompt_lines, limit):
     if not prompt_lines or limit <= 0:
         return ""
     fragments = []
+    seen = set()
     for line in prompt_lines:
         text = str(line)
-        if "FRAG]" in text:
-            fragments.append(text.split("FRAG]", 1)[1].split("|", 1)[0].strip())
-        else:
-            fragments.append(text.strip())
+        if "FRAG]" not in text:
+            continue
+
+        fragment = text.split("FRAG]", 1)[1].split("|", 1)[0].strip()
+        if not fragment or fragment in seen:
+            continue
+
+        fragments.append(fragment)
+        seen.add(fragment)
         if len(fragments) >= limit:
             break
     return "\n".join(item for item in fragments if item)
