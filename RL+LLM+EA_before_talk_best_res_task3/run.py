@@ -31,6 +31,12 @@ def main():
     parser.add_argument('--task_mode', type=str, default='1')  
     parser.add_argument('--log_results', action='store_true')  
     parser.add_argument('--log_dir', default="./results")  
+    parser.add_argument('--moleculestm_root', type=str, default="/root/autodl-tmp/MoleculeSTM-main")
+    parser.add_argument('--moleculestm_epochs', type=int, default=15)
+    parser.add_argument('--moleculestm_lr', type=float, default=0.1)
+    parser.add_argument('--moleculestm_l2_lambdas', type=str, default="10,1,0.1")
+    parser.add_argument('--moleculestm_beam_size', type=int, default=3)
+    parser.add_argument('--moleculestm_max_fragments', type=int, default=5)
     args = parser.parse_args()  
 
     args.method = args.method.lower()  

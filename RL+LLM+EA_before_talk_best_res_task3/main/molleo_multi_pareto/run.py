@@ -24,6 +24,7 @@ from main.pareto_optimizer import BaseOptimizer
 from torch.utils.data import DataLoader
 from crossAtt import MolMultiModalDataset
 from biot5 import BioT5
+from molecule_stm_editor import MoleculeSTMEditor
 from GPT4 import GPT4
 from clustering import restore_clusters_from_df, get_fp, compute_center_mol
 from utils import  get_brics_fragments, get_fp_scores
@@ -1030,10 +1031,14 @@ class GB_GA_Optimizer(BaseOptimizer):
             self.mol_lm = GPT4()
         elif args.mol_lm == "BioT5":
             self.mol_lm = BioT5()
+        elif args.mol_lm == "MoleculeSTM":
+            self.mol_lm = MoleculeSTMEditor(args)
         lm_name = "baseline"
         if args.mol_lm != None:
             lm_name = args.mol_lm
             self.mol_lm.task_mode = self.args.task_mode
+            if args.mol_lm == "MoleculeSTM":
+                self.mol_lm.task = self.args.max_obj
         self.scores_list1 = 'QED, SA, JNK3'
         self.scores_list2 = 'QED, SA, GSK3b'
         self.scores_list3 = 'QED, SA, DRD2, JNK3, GSK3b'
@@ -1364,7 +1369,7 @@ Do not omit any important low-score details, especially attachment point informa
                 print(f"h_prompt_lines: {h_prompt_lines}")
                 combine_prompt_high = res["high"]["chosen_frags"][:10]
                 combine_prompt_low = res["low"]["chosen_frags"][:10]
-            if self.args.mol_lm == 'BioT5':
+            if self.args.mol_lm in ('BioT5', 'MoleculeSTM'):
                 print(f"h_prompt_lines: {h_prompt_lines}")
                 combine_prompt_high = res["high"]["chosen_frags"][:10]
                 combine_prompt_low = res["low"]["chosen_frags"][:10]
@@ -1566,7 +1571,7 @@ Do not omit any important low-score details, especially attachment point informa
                         past_generation_total_low = update_generation_history(
                             past_generation_total_low, record, topk=3, reverse=False
                         )
-            elif self.args.mol_lm == 'BioT5':
+            elif self.args.mol_lm in ('BioT5', 'MoleculeSTM'):
                 # ===== 新增：初始化全局历史记录（保留Top 2）=====
                 past_generation_total = []  # 与GPT-4相同的全局历史记录
                 
@@ -1665,7 +1670,7 @@ Do not omit any important low-score details, especially attachment point informa
                 editted_smi = np.array(editted_smi)[sorted_idx].tolist()
                 offspring_mol = [Chem.MolFromSmiles(s) for s in editted_smi]
                 print("len offspring_mol", len(offspring_mol))
-            if self.args.mol_lm == 'BioT5':
+            if self.args.mol_lm in ('BioT5', 'MoleculeSTM'):
                 parent_main_scores = {
                     parent_mols: parent_scores,  
                     parent_mols: parent_scores,  
