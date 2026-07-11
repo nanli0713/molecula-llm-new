@@ -1,7 +1,10 @@
 from __future__ import print_function
 from collections import defaultdict
+import fcntl
 import math
+import os
 import random
+import time
 from typing import List
 from tqdm import tqdm
 from crossAtt_implements import Graph_encoder
@@ -34,6 +37,83 @@ DEFAULT_CLUSTER_CENTER_FPS = None
 DEFAULT_CLUSTER_CENTER_IDS = None
 CURRENT_HIGH_POOL_FEATURE = None
 CURRENT_LOW_POOL_FEATURE = None
+
+
+def _visible_gpu_id():
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
+    if torch.cuda.is_available():
+        visible_idx = torch.cuda.current_device()
+        if visible:
+            visible_ids = [item.strip() for item in visible.split(",") if item.strip()]
+            if 0 <= visible_idx < len(visible_ids):
+                return visible_ids[visible_idx]
+        return str(visible_idx)
+    if visible:
+        first = visible.split(",", 1)[0].strip()
+        if first:
+            return first
+    return "cpu"
+
+
+class CrossAttTrainLock:
+    def __init__(self, label="unknown"):
+        gpu_id = _visible_gpu_id()
+        safe_gpu_id = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in gpu_id)
+        self.label = label
+        self.gpu_id = gpu_id
+        self.path = "/tmp/molleo_crossatt_train_gpu_{}.lock".format(safe_gpu_id)
+        self.handle = None
+        self.start_time = None
+
+    def __enter__(self):
+        self.handle = open(self.path, "w")
+        self.start_time = time.time()
+        print(
+            "[CrossAttLock] waiting gpu={} label={} pid={} lock={}".format(
+                self.gpu_id, self.label, os.getpid(), self.path
+            ),
+            flush=True,
+        )
+        fcntl.flock(self.handle, fcntl.LOCK_EX)
+        waited = time.time() - self.start_time
+        print(
+            "[CrossAttLock] acquired gpu={} label={} pid={} wait={:.1f}s".format(
+                self.gpu_id, self.label, os.getpid(), waited
+            ),
+            flush=True,
+        )
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if torch.cuda.is_available():
+            try:
+                torch.cuda.synchronize()
+            except Exception as sync_exc:
+                print("[CrossAttLock] cuda synchronize skipped: {}".format(sync_exc), flush=True)
+            torch.cuda.empty_cache()
+        if self.handle is not None:
+            fcntl.flock(self.handle, fcntl.LOCK_UN)
+            self.handle.close()
+            self.handle = None
+        print(
+            "[CrossAttLock] released gpu={} label={} pid={}".format(
+                self.gpu_id, self.label, os.getpid()
+            ),
+            flush=True,
+        )
+        return False
+
+
+def _crossatt_lock_label(args):
+    oracles = getattr(args, "oracles", None)
+    if oracles:
+        return str(oracles[0])
+    task_mode = getattr(args, "task_mode", None)
+    if task_mode:
+        return "task_mode_{}".format(task_mode)
+    return "unknown"
+
+
 def format_detail(detail):
     if detail is None:
         return ""
@@ -1641,71 +1721,72 @@ Do not omit any important low-score details, especially attachment point informa
             )
             print(f"population_scores: {len(population_scores)}, offspring_mol:{len(offspring_mol)}, valid_offspring:{len(valid_offspring_mol)}")
             if iteration % 3 == 0:
-                if iteration != 1 and iteration != 2 and iteration != 3:
-                    self.cross_att.load_state_dict(torch.load(self.add_crossatt_path, map_location=self.device))
-                    self.cross_att_predictor.load_state_dict(torch.load(self.add_crossatt_path_pre, map_location=self.device))
-                for p in self.cross_att.parameters():
-                    p.requires_grad = False
-                for p in self.cross_att_predictor.parameters():
-                    p.requires_grad = True
+                with CrossAttTrainLock(_crossatt_lock_label(self.args)):
+                    if iteration != 1 and iteration != 2 and iteration != 3:
+                        self.cross_att.load_state_dict(torch.load(self.add_crossatt_path, map_location=self.device))
+                        self.cross_att_predictor.load_state_dict(torch.load(self.add_crossatt_path_pre, map_location=self.device))
+                    for p in self.cross_att.parameters():
+                        p.requires_grad = False
+                    for p in self.cross_att_predictor.parameters():
+                        p.requires_grad = True
 
-                att_self_module = self.cross_att.cross_att.att_self
-                lora_wrapped = _replace_linear_with_lora(att_self_module, r=4, alpha=8, dropout=0.05)
-                lora_params = collect_lora_trainable_params(lora_wrapped)
-                print('length of offspring_mol_temp:',len(offspring_mol_temp))
-                print("Retrain the cross attention part with LoRA.....")
-                recent_experience = offspring_mol_temp
+                    att_self_module = self.cross_att.cross_att.att_self
+                    lora_wrapped = _replace_linear_with_lora(att_self_module, r=4, alpha=8, dropout=0.05)
+                    lora_params = collect_lora_trainable_params(lora_wrapped)
+                    print('length of offspring_mol_temp:',len(offspring_mol_temp))
+                    print("Retrain the cross attention part with LoRA.....")
+                    recent_experience = offspring_mol_temp
 
-                training_batch = recent_experience
-                smiles_batch = [item[0] for item in training_batch]
-                labels_batch = [item[1] for item in training_batch]
+                    training_batch = recent_experience
+                    smiles_batch = [item[0] for item in training_batch]
+                    labels_batch = [item[1] for item in training_batch]
 
-                incremental_dataset = MolMultiModalDataset(smiles_batch, labels_batch)
-                incremental_loader = DataLoader(incremental_dataset, batch_size=32, shuffle=False, collate_fn=collate_fn)
+                    incremental_dataset = MolMultiModalDataset(smiles_batch, labels_batch)
+                    incremental_loader = DataLoader(incremental_dataset, batch_size=32, shuffle=False, collate_fn=collate_fn)
 
-                self.cross_att.train()
-                self.cross_att_predictor.train()
+                    self.cross_att.train()
+                    self.cross_att_predictor.train()
 
-                trainable_params = list(self.cross_att_predictor.parameters()) + lora_params
-                inc_optimizer = torch.optim.AdamW(trainable_params, lr=2e-4, weight_decay=1e-4)
+                    trainable_params = list(self.cross_att_predictor.parameters()) + lora_params
+                    inc_optimizer = torch.optim.AdamW(trainable_params, lr=2e-4, weight_decay=1e-4)
 
-                for epoch in tqdm(range(5)):
-                    total_loss = 0.0
-                    n_batches = 0
-                    for batch in incremental_loader:
-                        batch = {k: v.to(device=self.device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
-                        output_emb = self.cross_att(
-                            mol=batch["mol"],
-                            adj_1=batch["adj_1"],
-                            nd_1=batch["nd_1"],
-                            ed_1=batch["ed_1"],
-                            de_1=batch["de_1"],
-                            mask_1=batch["mask_1"],
-                            bg=batch["bg"],
-                            entity_emb=batch["entity_emb"],
-                            relation_emb=batch["relation_emb"]
-                        ).to(self.device)
+                    for epoch in tqdm(range(5)):
+                        total_loss = 0.0
+                        n_batches = 0
+                        for batch in incremental_loader:
+                            batch = {k: v.to(device=self.device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
+                            output_emb = self.cross_att(
+                                mol=batch["mol"],
+                                adj_1=batch["adj_1"],
+                                nd_1=batch["nd_1"],
+                                ed_1=batch["ed_1"],
+                                de_1=batch["de_1"],
+                                mask_1=batch["mask_1"],
+                                bg=batch["bg"],
+                                entity_emb=batch["entity_emb"],
+                                relation_emb=batch["relation_emb"]
+                            ).to(self.device)
 
-                        pred = self.cross_att_predictor(output_emb).squeeze(-1).to(self.device)
-                        loss = self.criterion(pred, batch["label"])
+                            pred = self.cross_att_predictor(output_emb).squeeze(-1).to(self.device)
+                            loss = self.criterion(pred, batch["label"])
 
-                        inc_optimizer.zero_grad()
-                        loss.backward()
-                        torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=1.0)
-                        inc_optimizer.step()
+                            inc_optimizer.zero_grad()
+                            loss.backward()
+                            torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=1.0)
+                            inc_optimizer.step()
 
-                        total_loss += loss.item()
-                        n_batches += 1
+                            total_loss += loss.item()
+                            n_batches += 1
 
-                    avg_loss = total_loss / max(1, n_batches)
-                    print(f"Epoch {epoch + 1}/10, Average Loss: {avg_loss:.4f}")
+                        avg_loss = total_loss / max(1, n_batches)
+                        print(f"Epoch {epoch + 1}/10, Average Loss: {avg_loss:.4f}")
 
-                merge_lora_and_unwrap(lora_wrapped)
+                    merge_lora_and_unwrap(lora_wrapped)
 
-                torch.save(self.cross_att.state_dict(), self.add_crossatt_path)
-                torch.save(self.cross_att_predictor.state_dict(), self.add_crossatt_path_pre)
-                print(f"len of population right now: {len(offspring_mol_temp)}")
-                offspring_mol_temp = []
+                    torch.save(self.cross_att.state_dict(), self.add_crossatt_path)
+                    torch.save(self.cross_att_predictor.state_dict(), self.add_crossatt_path_pre)
+                    print(f"len of population right now: {len(offspring_mol_temp)}")
+                    offspring_mol_temp = []
 
             if self.replay is not None and self.trainer is not None and len(self.replay) >= self.batch_size:
                 train_loss = self.trainer.train_step(self.replay, self.batch_size)

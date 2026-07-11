@@ -100,9 +100,9 @@ class MoleculeSTMEditor(nn.Module):
             ssl_emb_dim=getattr(args, "moleculestm_ssl_emb_dim", 256),
             max_seq_len=getattr(args, "moleculestm_max_seq_len", 512),
             lr=getattr(args, "moleculestm_lr", 0.1),
-            epochs=getattr(args, "moleculestm_epochs", 30),
-            l2_lambdas=getattr(args, "moleculestm_l2_lambdas", "10,1,0.1,0.01,0.001"),
-            beam_size=getattr(args, "moleculestm_beam_size", 5),
+            epochs=getattr(args, "moleculestm_epochs", 15),
+            l2_lambdas=getattr(args, "moleculestm_l2_lambdas", "10,1,0.1"),
+            beam_size=getattr(args, "moleculestm_beam_size", 3),
             max_fragments=getattr(args, "moleculestm_max_fragments", 5),
             normalize=True,
         )
